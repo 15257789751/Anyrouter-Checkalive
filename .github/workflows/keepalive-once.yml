@@ -8,32 +8,71 @@ on:
         required: false
         default: 'https://anyrouter.top'
       model:
-        description: 'Claude model for health checks'
+        description: 'Model for health checks'
         required: false
         default: 'gpt-6-astra'
 
 jobs:
   keepalive-once:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Claude Code CLI
-        run: |
-          curl -fsSL https://claude.ai/install.sh | bash
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Verify Claude CLI
-        run: claude --version
-
-      - name: Run keepalive once for all tokens
+      - name: Test and Keepalive gpt-6-astra
         env:
           ANYROUTER_TOKENS: ${{ secrets.ANYROUTER_TOKENS }}
           BASE_URL: ${{ github.event.inputs.base_url || 'https://anyrouter.top' }}
           MODEL: ${{ github.event.inputs.model || 'gpt-6-astra' }}
-          QQ_EMAIL: ${{ secrets.QQ_EMAIL }}
-          QQ_SMTP_AUTH_CODE: ${{ secrets.QQ_SMTP_AUTH_CODE }}
-          CI: "true"
-        run: bash scripts/run-all.sh --once
+        run: |
+          BASE_URL="${BASE_URL%/}"
+          echo "=========================================="
+          echo "Base URL: $BASE_URL"
+          echo "Target Model: $MODEL"
+          echo "=========================================="
+
+          # 按换行符或逗号拆分多账号 Token
+          IFS=$'\n,'
+          for token in $ANYROUTER_TOKENS; do
+            token=$(echo "$token" | xargs)
+            if [ -z "$token" ]; then continue; fi
+
+            echo "Testing Token: ${token:0:8}****** ..."
+
+            # 发起标准的 API 心跳请求
+            response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "${BASE_URL}/v1/chat/completions" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $token" \
+              -d '{
+                "model": "'"$MODEL"'",
+                "messages": [{"role": "user", "content": "144 divided by 12 = ?"}],
+                "max_tokens": 15
+              }')
+
+            http_code=$(echo "$response" | grep "HTTP_STATUS" | cut -d: -f2)
+            body=$(echo "$response" | sed '/HTTP_STATUS/d')
+
+            # 如果中转站用的是 Anthropic 格式，自动备选重试
+            if [ "$http_code" -eq 404 ]; then
+              response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "${BASE_URL}/v1/messages" \
+                -H "Content-Type: application/json" \
+                -H "x-api-key: $token" \
+                -H "anthropic-version: 2023-06-01" \
+                -d '{
+                  "model": "'"$MODEL"'",
+                  "messages": [{"role": "user", "content": "144 divided by 12 = ?"}],
+                  "max_tokens": 15
+                }')
+              http_code=$(echo "$response" | grep "HTTP_STATUS" | cut -d: -f2)
+              body=$(echo "$response" | sed '/HTTP_STATUS/d')
+            fi
+
+            echo "Response Status Code: $http_code"
+            echo "Response Body: $body"
+
+            if [ "$http_code" -eq 200 ]; then
+              echo ">>> [SUCCESS] $MODEL 保活请求成功！账号已保持活跃！"
+            else
+              echo ">>> [FAILED] 请求失败，状态码: $http_code"
+              exit 1
+            fi
+            echo "=========================================="
+          done
