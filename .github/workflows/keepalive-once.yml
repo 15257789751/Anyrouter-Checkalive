@@ -20,20 +20,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 1. 安装官方 Codex CLI 客户端
       - name: Install Codex CLI
         run: |
           sudo npm install -g @openai/codex
           codex --version
 
-      # 2. 循环遍历每个 Token，配置 Codex 并发送心跳
       - name: Run Codex Keepalive
         env:
           ANYROUTER_TOKENS: ${{ secrets.ANYROUTER_TOKENS }}
           BASE_URL: ${{ github.event.inputs.base_url || 'https://anyrouter.top' }}
           MODEL: ${{ github.event.inputs.model || 'gpt-6-astra' }}
         run: |
-          # 确保 URL 末尾带有 /v1 路径
           BASE_URL="${BASE_URL%/}"
           if [[ "$BASE_URL" != */v1 ]]; then
             BASE_URL="${BASE_URL}/v1"
@@ -45,7 +42,6 @@ jobs:
           echo "Model: $MODEL"
           echo "=========================================="
 
-          # 创建 Codex 配置目录
           mkdir -p ~/.codex
 
           IFS=$'\n,'
@@ -55,23 +51,18 @@ jobs:
 
             echo "Testing Token: ${token:0:8}****** with Codex CLI..."
 
-            # 动态写入 Codex CLI 配置文件，指向 AnyRouter
-            cat <<EOF > ~/.codex/config.toml
-model = "$MODEL"
-model_provider = "anyrouter"
+            echo "model = \"$MODEL\"" > ~/.codex/config.toml
+            echo "model_provider = \"anyrouter\"" >> ~/.codex/config.toml
+            echo "" >> ~/.codex/config.toml
+            echo "[model_providers.anyrouter]" >> ~/.codex/config.toml
+            echo "name = \"AnyRouter\"" >> ~/.codex/config.toml
+            echo "base_url = \"$BASE_URL\"" >> ~/.codex/config.toml
+            echo "wire_api = \"responses\"" >> ~/.codex/config.toml
+            echo "env_key = \"CODEX_ANYROUTER_KEY\"" >> ~/.codex/config.toml
+            echo "requires_openai_auth = false" >> ~/.codex/config.toml
 
-[model_providers.anyrouter]
-name = "AnyRouter"
-base_url = "$BASE_URL"
-wire_api = "responses"
-env_key = "CODEX_ANYROUTER_KEY"
-requires_openai_auth = false
-EOF
-
-            # 注入当前账号的 API Key
             export CODEX_ANYROUTER_KEY="$token"
 
-            # 执行单次无交互心跳请求
             codex exec "What is 144 divided by 12? Reply with just the number."
 
             echo ">>> [SUCCESS] Token: ${token:0:8}****** 通过 Codex 客户端保活成功！"
