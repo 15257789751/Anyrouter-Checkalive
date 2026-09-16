@@ -15,10 +15,7 @@ on:
         required: false
         default: 'gpt-6-astra'
 
-# 避免多任务重叠运行
-concurrency:
-  group: keepalive
-  cancel-in-progress: false
+
 
 jobs:
   keepalive:
