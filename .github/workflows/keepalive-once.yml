@@ -17,62 +17,63 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Test and Keepalive gpt-6-astra
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 1. 安装官方 Codex CLI 客户端
+      - name: Install Codex CLI
+        run: |
+          sudo npm install -g @openai/codex
+          codex --version
+
+      # 2. 循环遍历每个 Token，配置 Codex 并发送心跳
+      - name: Run Codex Keepalive
         env:
           ANYROUTER_TOKENS: ${{ secrets.ANYROUTER_TOKENS }}
           BASE_URL: ${{ github.event.inputs.base_url || 'https://anyrouter.top' }}
           MODEL: ${{ github.event.inputs.model || 'gpt-6-astra' }}
         run: |
+          # 确保 URL 末尾带有 /v1 路径
           BASE_URL="${BASE_URL%/}"
+          if [[ "$BASE_URL" != */v1 ]]; then
+            BASE_URL="${BASE_URL}/v1"
+          fi
+
           echo "=========================================="
+          echo "Using Codex CLI Client"
           echo "Base URL: $BASE_URL"
-          echo "Target Model: $MODEL"
+          echo "Model: $MODEL"
           echo "=========================================="
 
-          # 按换行符或逗号拆分多账号 Token
+          # 创建 Codex 配置目录
+          mkdir -p ~/.codex
+
           IFS=$'\n,'
           for token in $ANYROUTER_TOKENS; do
             token=$(echo "$token" | xargs)
             if [ -z "$token" ]; then continue; fi
 
-            echo "Testing Token: ${token:0:8}****** ..."
+            echo "Testing Token: ${token:0:8}****** with Codex CLI..."
 
-            # 发起标准的 API 心跳请求
-            response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "${BASE_URL}/v1/chat/completions" \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer $token" \
-              -d '{
-                "model": "'"$MODEL"'",
-                "messages": [{"role": "user", "content": "144 divided by 12 = ?"}],
-                "max_tokens": 15
-              }')
+            # 动态写入 Codex CLI 配置文件，指向 AnyRouter
+            cat <<EOF > ~/.codex/config.toml
+model = "$MODEL"
+model_provider = "anyrouter"
 
-            http_code=$(echo "$response" | grep "HTTP_STATUS" | cut -d: -f2)
-            body=$(echo "$response" | sed '/HTTP_STATUS/d')
+[model_providers.anyrouter]
+name = "AnyRouter"
+base_url = "$BASE_URL"
+wire_api = "responses"
+env_key = "CODEX_ANYROUTER_KEY"
+requires_openai_auth = false
+EOF
 
-            # 如果中转站用的是 Anthropic 格式，自动备选重试
-            if [ "$http_code" -eq 404 ]; then
-              response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "${BASE_URL}/v1/messages" \
-                -H "Content-Type: application/json" \
-                -H "x-api-key: $token" \
-                -H "anthropic-version: 2023-06-01" \
-                -d '{
-                  "model": "'"$MODEL"'",
-                  "messages": [{"role": "user", "content": "144 divided by 12 = ?"}],
-                  "max_tokens": 15
-                }')
-              http_code=$(echo "$response" | grep "HTTP_STATUS" | cut -d: -f2)
-              body=$(echo "$response" | sed '/HTTP_STATUS/d')
-            fi
+            # 注入当前账号的 API Key
+            export CODEX_ANYROUTER_KEY="$token"
 
-            echo "Response Status Code: $http_code"
-            echo "Response Body: $body"
+            # 执行单次无交互心跳请求
+            codex exec "What is 144 divided by 12? Reply with just the number."
 
-            if [ "$http_code" -eq 200 ]; then
-              echo ">>> [SUCCESS] $MODEL 保活请求成功！账号已保持活跃！"
-            else
-              echo ">>> [FAILED] 请求失败，状态码: $http_code"
-              exit 1
-            fi
+            echo ">>> [SUCCESS] Token: ${token:0:8}****** 通过 Codex 客户端保活成功！"
             echo "=========================================="
           done
