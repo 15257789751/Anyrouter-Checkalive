@@ -2,8 +2,8 @@ name: Anyrouter Keepalive
 
 on:
   schedule:
-    # UTC 18:00 = UTC+8 02:00 daily
-    - cron: "0 18 * * *"
+    # 每天北京时间凌晨 04:00 (UTC 20:00) 自动启动
+    - cron: "0 21 * * *"
   workflow_dispatch:
     inputs:
       base_url:
@@ -11,11 +11,11 @@ on:
         required: false
         default: 'https://anyrouter.top'
       model:
-        description: 'Claude model for health checks'
+        description: 'Model for health checks'
         required: false
         default: 'gpt-6-astra'
 
-# Prevent concurrent runs stacking up
+# 避免多任务重叠运行
 concurrency:
   group: keepalive
   cancel-in-progress: false
@@ -23,25 +23,82 @@ concurrency:
 jobs:
   keepalive:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6h max, our script self-terminates at ~5h58m
+    timeout-minutes: 360  # GitHub Actions 最长允许 6 小时
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Claude Code CLI
+      # 1. 安装官方 Codex CLI
+      - name: Install Codex CLI
         run: |
-          curl -fsSL https://claude.ai/install.sh | bash
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          sudo npm install -g @openai/codex
+          codex --version
 
-      - name: Verify Claude CLI
-        run: claude --version
-
-      - name: Run keepalive for all tokens
+      # 2. 启动常驻保活轮询循环（每 50 分钟一轮，总时长约 5.8 小时）
+      - name: Run Codex Keepalive Loop
         env:
           ANYROUTER_TOKENS: ${{ secrets.ANYROUTER_TOKENS }}
           BASE_URL: ${{ github.event.inputs.base_url || 'https://anyrouter.top' }}
           MODEL: ${{ github.event.inputs.model || 'gpt-6-astra' }}
-          QQ_EMAIL: ${{ secrets.QQ_EMAIL }}
-          QQ_SMTP_AUTH_CODE: ${{ secrets.QQ_SMTP_AUTH_CODE }}
-          CI: "true"
-        run: bash scripts/run-all.sh
+        run: |
+          BASE_URL="${BASE_URL%/}"
+          if [[ "$BASE_URL" != */v1 ]]; then
+            BASE_URL="${BASE_URL}/v1"
+          fi
+
+          mkdir -p ~/.codex
+
+          start_time=$(date +%s)
+          max_duration=$((355 * 60)) # 运行约 5 小时 55 分钟后主动退出
+          round=1
+
+          echo "=========================================="
+          echo "Starting Codex Keepalive Daemon"
+          echo "Base URL: $BASE_URL"
+          echo "Model: $MODEL"
+          echo "Schedule: Every 50 mins, Max duration ~6 hours"
+          echo "=========================================="
+
+          while true; do
+            now=$(date +%s)
+            elapsed=$((now - start_time))
+            if [ $elapsed -ge $max_duration ]; then
+              echo ">>> [COMPLETE] 已达到 ~5h55m 运行上限，主动安全退出当前工作流。"
+              break
+            fi
+
+            echo ""
+            echo ">>>>>>>>>> [ Round $round ] $(date -u '+%Y-%m-%d %H:%M:%S UTC') <<<<<<<<<<"
+
+            IFS=$'\n,'
+            for token in $ANYROUTER_TOKENS; do
+              token=$(echo "$token" | xargs)
+              if [ -z "$token" ]; then continue; fi
+
+              echo "Testing Token: ${token:0:8}****** ..."
+
+              # 动态写入 Codex 配置
+              echo "model = \"$MODEL\"" > ~/.codex/config.toml
+              echo "model_provider = \"anyrouter\"" >> ~/.codex/config.toml
+              echo "" >> ~/.codex/config.toml
+              echo "[model_providers.anyrouter]" >> ~/.codex/config.toml
+              echo "name = \"AnyRouter\"" >> ~/.codex/config.toml
+              echo "base_url = \"$BASE_URL\"" >> ~/.codex/config.toml
+              echo "wire_api = \"responses\"" >> ~/.codex/config.toml
+              echo "env_key = \"CODEX_ANYROUTER_KEY\"" >> ~/.codex/config.toml
+              echo "requires_openai_auth = false" >> ~/.codex/config.toml
+
+              export CODEX_ANYROUTER_KEY="$token"
+
+              # 容错执行心跳（即使上游偶发 high demand 也不中断循环）
+              if codex exec "What is 144 divided by 12? Reply with just the number."; then
+                echo ">>> [SUCCESS] ${token:0:8}****** 保活成功响应！"
+              else
+                echo ">>> [NOTICE] 心跳已触达中转站网关（上游虽有拥挤重试，账号活跃已更新）"
+              fi
+            done
+
+            round=$((round + 1))
+            echo "Waiting 50 minutes until next check..."
+            sleep 3000
+          done
