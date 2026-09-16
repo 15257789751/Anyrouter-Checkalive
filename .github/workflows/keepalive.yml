@@ -15,7 +15,9 @@ on:
         required: false
         default: 'gpt-6-astra'
 
-
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
 
 jobs:
   keepalive:
